@@ -27,7 +27,13 @@ st.set_page_config(
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.agents import MetadataAgent
+# ── Trial mode ───────────────────────────────────────────────────────────────
+TRIAL_MODE = os.environ.get("TRIAL_MODE", "false").lower() == "true"
+TRIAL_RUN_CAP = 3
+TRIAL_MODEL = "claude-haiku-4-5-20251001"
+GITHUB_URL = "https://github.com/basavarajshepur-lab/metadata-agent"
+
+from src.agents import DataQualityAgent, LineageAgent, MetadataAgent
 from src.config import AgentConfig
 from src.exporters import export_csv, export_pdf, export_word
 from src.extractors import extract
@@ -204,34 +210,66 @@ def _extract_profile(file_bytes: bytes, filename: str):
         os.unlink(tmp_path)
 
 
+def _staged_temp_path() -> str:
+    """Write the currently staged file to a temp file and return its path.
+
+    LineageAgent.run() and DataQualityAgent.run() take a file path (they call
+    extract() themselves), unlike MetadataAgent.generate() which takes an
+    already-extracted profile.
+    """
+    file_bytes = st.session_state["_staged_bytes"]
+    filename = st.session_state["_staged_name"]
+    ext = Path(filename).suffix.lower()
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+        tmp.write(file_bytes)
+        return tmp.name
+
+
 # ── Session state init ──────────────────────────────────────────────────────
 for key, default in {
     "metadata": None,
     "profile": None,
+    "lineage": None,
+    "quality_report": None,
     "error": None,
     "last_filename": None,
     "_staged_bytes": None,
     "_staged_name": None,
+    "trial_runs_used": 0,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
+
+trial_limit_reached = TRIAL_MODE and st.session_state["trial_runs_used"] >= TRIAL_RUN_CAP
+
+
+def _consume_trial_run() -> None:
+    if TRIAL_MODE:
+        st.session_state["trial_runs_used"] += 1
 
 
 # ── Sidebar ────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("### Agent Settings")
 
-    api_key_input = st.text_input(
-        "Anthropic API Key",
-        value=os.environ.get("ANTHROPIC_API_KEY", ""),
-        type="password",
-        help="Get your key at console.anthropic.com. You can also set ANTHROPIC_API_KEY in a .env file.",
-    )
-    if api_key_input:
-        os.environ["ANTHROPIC_API_KEY"] = api_key_input
+    if TRIAL_MODE:
+        st.caption(
+            f"🔒 Trial mode — model locked to Haiku, {TRIAL_RUN_CAP} runs/session. "
+            f"[Clone the repo]({GITHUB_URL}) to use your own API key and model choice."
+        )
+        selected_model = TRIAL_MODEL
+    else:
+        api_key_input = st.text_input(
+            "Anthropic API Key",
+            value=os.environ.get("ANTHROPIC_API_KEY", ""),
+            type="password",
+            help="Get your key at console.anthropic.com. You can also set ANTHROPIC_API_KEY in a .env file.",
+        )
+        if api_key_input:
+            os.environ["ANTHROPIC_API_KEY"] = api_key_input
 
-    model_label = st.selectbox("Model", list(MODELS.keys()), index=0)
-    selected_model = MODELS[model_label]
+        model_label = st.selectbox("Model", list(MODELS.keys()), index=0)
+        selected_model = MODELS[model_label]
 
     st.divider()
 
@@ -255,7 +293,10 @@ with st.sidebar:
             )
         st.divider()
         if st.button("Clear results / New file", use_container_width=True):
-            for k in ["metadata", "profile", "last_filename", "error", "_staged_bytes", "_staged_name"]:
+            for k in [
+                "metadata", "profile", "lineage", "quality_report",
+                "last_filename", "error", "_staged_bytes", "_staged_name",
+            ]:
                 st.session_state[k] = None
             st.rerun()
 
@@ -310,19 +351,31 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+if TRIAL_MODE:
+    st.info(
+        f"🔒 **Live Trial** — sample data only, {TRIAL_RUN_CAP} agent runs per browser session. "
+        f"[Clone the repo]({GITHUB_URL}) to bring your own files and API key.",
+        icon="🔒",
+    )
+    if trial_limit_reached:
+        st.warning(
+            f"Trial limit reached ({TRIAL_RUN_CAP} runs used this session). "
+            f"[Clone the repo]({GITHUB_URL}) to keep exploring with your own data."
+        )
+
 
 # ── Upload / sample section (shown when no metadata yet) ────────────────────
 if st.session_state.metadata is None:
 
     # API key warning
-    if not _api_key_set():
+    if not TRIAL_MODE and not _api_key_set():
         st.warning(
             "Set your **Anthropic API Key** in the sidebar to generate metadata. "
             "You can still upload a file to preview its structure first.",
             icon="🔑",
         )
 
-    # ── Input source tabs ──────────────────────────────────────────────────
+    # ── Input source tabs ────────────────────────────────────────────────────
     tab_upload, tab_gmail, tab_drive = st.tabs([
         "📁 Upload File", "📧 From Gmail", "☁️ From Google Drive",
     ])
@@ -332,18 +385,24 @@ if st.session_state.metadata is None:
         col_upload, col_sample = st.columns([3, 1], gap="large")
 
         with col_upload:
-            st.markdown('<p class="section-label">Upload your dataset or schema</p>', unsafe_allow_html=True)
-            uploaded = st.file_uploader(
-                "Drag and drop or browse",
-                type=["csv", "json", "sql", "ddl"],
-                label_visibility="collapsed",
-                help="CSV datasets, JSON Schemas, or SQL DDL files up to 50 MB",
-            )
+            if TRIAL_MODE:
+                st.info("File upload is disabled in trial mode — pick a sample on the right.")
+                uploaded = None
+            else:
+                st.markdown('<p class="section-label">Upload your dataset or schema</p>', unsafe_allow_html=True)
+                uploaded = st.file_uploader(
+                    "Drag and drop or browse",
+                    type=["csv", "json", "sql", "ddl"],
+                    label_visibility="collapsed",
+                    help="CSV datasets, JSON Schemas, or SQL DDL files up to 50 MB",
+                )
             if uploaded is not None:
                 fb = uploaded.getvalue()
                 fn = getattr(uploaded, "name", "upload")
                 if fn != st.session_state["_staged_name"]:
                     st.session_state["profile"] = None
+                    st.session_state["lineage"] = None
+                    st.session_state["quality_report"] = None
                 st.session_state["_staged_bytes"] = fb
                 st.session_state["_staged_name"] = fn
 
@@ -356,12 +415,19 @@ if st.session_state.metadata is None:
                     new_name = Path(path).name
                     if new_name != st.session_state["_staged_name"]:
                         st.session_state["profile"] = None
+                        st.session_state["lineage"] = None
+                        st.session_state["quality_report"] = None
                     st.session_state["_staged_bytes"] = data
                     st.session_state["_staged_name"] = new_name
 
     # ── Tab 2: Gmail ────────────────────────────────────────────────────────
     with tab_gmail:
-        if not _GOOGLE_OK:
+        if TRIAL_MODE:
+            st.info(
+                f"Gmail connection is disabled in trial mode (requires uploading Google OAuth "
+                f"credentials). [Clone the repo]({GITHUB_URL}) to connect your own Gmail account."
+            )
+        elif not _GOOGLE_OK:
             st.info(
                 "Google API libraries not installed. Run:\n\n"
                 "```\npip install google-api-python-client google-auth-httplib2 google-auth-oauthlib\n```"
@@ -443,6 +509,8 @@ if st.session_state.metadata is None:
                                         os.unlink(tmp)
                                         if att["filename"] != st.session_state["_staged_name"]:
                                             st.session_state["profile"] = None
+                                            st.session_state["lineage"] = None
+                                            st.session_state["quality_report"] = None
                                         st.session_state["_staged_bytes"] = raw
                                         st.session_state["_staged_name"] = att["filename"]
                                         st.rerun()
@@ -451,7 +519,12 @@ if st.session_state.metadata is None:
 
     # ── Tab 3: Google Drive ─────────────────────────────────────────────────
     with tab_drive:
-        if not _GOOGLE_OK:
+        if TRIAL_MODE:
+            st.info(
+                f"Google Drive connection is disabled in trial mode (requires uploading Google "
+                f"OAuth credentials). [Clone the repo]({GITHUB_URL}) to connect your own Drive."
+            )
+        elif not _GOOGLE_OK:
             st.info(
                 "Google API libraries not installed. Run:\n\n"
                 "```\npip install google-api-python-client google-auth-httplib2 google-auth-oauthlib\n```"
@@ -492,6 +565,8 @@ if st.session_state.metadata is None:
                                 os.unlink(tmp)
                                 if df_item["name"] != st.session_state["_staged_name"]:
                                     st.session_state["profile"] = None
+                                    st.session_state["lineage"] = None
+                                    st.session_state["quality_report"] = None
                                 st.session_state["_staged_bytes"] = raw
                                 st.session_state["_staged_name"] = df_item["name"]
                                 st.rerun()
@@ -547,13 +622,15 @@ if st.session_state.metadata is None:
 
         st.divider()
 
-        btn_disabled = not _api_key_set()
+        btn_disabled = (not _api_key_set()) or trial_limit_reached
+        btn_reason = " (trial limit reached)" if trial_limit_reached else (" (API key required)" if btn_disabled else "")
         if st.button(
-            "Generate Metadata" + (" (API key required)" if btn_disabled else ""),
+            "Generate Metadata" + btn_reason,
             type="primary",
             use_container_width=True,
             disabled=btn_disabled,
         ):
+            _consume_trial_run()
             with st.spinner("Claude is analysing the dataset and generating metadata... (30–90 seconds)"):
                 try:
                     config = AgentConfig(model=selected_model)
@@ -634,8 +711,8 @@ else:
     st.markdown("")
 
     # ── Tabs ───────────────────────────────────────────────────────────────
-    tab_overview, tab_fields, tab_quality, tab_compliance, tab_raw = st.tabs([
-        "Overview", "Fields", "Quality Report", "Compliance", "Raw YAML",
+    tab_overview, tab_fields, tab_quality, tab_compliance, tab_lineage, tab_dataquality, tab_raw = st.tabs([
+        "Overview", "Fields", "Quality Report", "Compliance", "Lineage", "Data Quality (Full)", "Raw YAML",
     ])
 
     # ──────────────────── OVERVIEW tab ────────────────────────────────────
@@ -900,6 +977,155 @@ else:
                         f"`{f.name}` — {f.pii_type.value if f.pii_type else 'PII'}",
                         unsafe_allow_html=True,
                     )
+
+    # ──────────────────── LINEAGE tab ─────────────────────────────────────
+    with tab_lineage:
+        staged_name = st.session_state["_staged_name"] or ""
+        if not staged_name.lower().endswith((".sql", ".ddl")):
+            st.info(
+                "The Lineage Agent parses SQL/DDL and maps field-level lineage against "
+                "BCBS 239 Principle 2. The current file isn't SQL/DDL, so lineage isn't "
+                "applicable — try the **Risk Positions (SQL DDL)** sample."
+            )
+        else:
+            lineage = st.session_state.get("lineage")
+            if lineage is None:
+                lineage_disabled = (not _api_key_set()) or trial_limit_reached
+                lineage_reason = " (trial limit reached)" if trial_limit_reached else (" (API key required)" if lineage_disabled else "")
+                if st.button(
+                    "Run Lineage Analysis" + lineage_reason,
+                    type="primary",
+                    disabled=lineage_disabled,
+                    key="btn_run_lineage",
+                ):
+                    _consume_trial_run()
+                    with st.spinner("Claude is parsing SQL and mapping field-level lineage..."):
+                        tmp_path = _staged_temp_path()
+                        try:
+                            agent = LineageAgent(AgentConfig(model=selected_model))
+                            st.session_state["lineage"] = agent.run(tmp_path)
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Lineage agent error: {e}")
+                        finally:
+                            os.unlink(tmp_path)
+            else:
+                bcbs_label = (
+                    "✅ BCBS 239 compliant" if lineage.bcbs_239_compliant
+                    else "⚠️ Partially compliant"
+                )
+                st.markdown(f"#### {bcbs_label}")
+                if lineage.bcbs_notes:
+                    st.markdown(lineage.bcbs_notes)
+
+                l1, l2, l3 = st.columns(3)
+                l1.metric("Fields mapped", len(lineage.field_lineages))
+                l2.metric("Source tables", len(lineage.source_tables))
+                l3.metric("Unresolved fields", len(lineage.unresolved_fields))
+
+                if lineage.source_tables:
+                    st.markdown("**Source tables:** " + ", ".join(f"`{t}`" for t in lineage.source_tables))
+
+                st.divider()
+                lineage_rows = [
+                    {
+                        "Target Field": fl.target_field,
+                        "Type": fl.lineage_type,
+                        "Confidence": fl.confidence,
+                        "Sources": ", ".join(f"{s.table}.{s.column}" for s in fl.source_fields) or "—",
+                        "Transformation": fl.transformation or "—",
+                    }
+                    for fl in lineage.field_lineages
+                ]
+                st.dataframe(pd.DataFrame(lineage_rows), hide_index=True, use_container_width=True)
+
+                if lineage.unresolved_fields:
+                    st.warning("Unresolved fields: " + ", ".join(f"`{f}`" for f in lineage.unresolved_fields))
+
+                if st.button("Re-run", key="btn_rerun_lineage"):
+                    st.session_state["lineage"] = None
+                    st.rerun()
+
+    # ──────────────────── DATA QUALITY (FULL) tab ─────────────────────────
+    with tab_dataquality:
+        report = st.session_state.get("quality_report")
+        if report is None:
+            dq_disabled = (not _api_key_set()) or trial_limit_reached
+            dq_reason = " (trial limit reached)" if trial_limit_reached else (" (API key required)" if dq_disabled else "")
+            if st.button(
+                "Run Full Data Quality Analysis" + dq_reason,
+                type="primary",
+                disabled=dq_disabled,
+                key="btn_run_dq",
+            ):
+                _consume_trial_run()
+                with st.spinner("Claude is profiling the dataset against DAMA-DMBOK dimensions..."):
+                    tmp_path = _staged_temp_path()
+                    try:
+                        agent = DataQualityAgent(AgentConfig(model=selected_model))
+                        st.session_state["quality_report"] = agent.run(tmp_path)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Data Quality agent error: {e}")
+                    finally:
+                        os.unlink(tmp_path)
+        else:
+            dq_colour = "green" if report.passed else "red"
+            dq_status = "PASSED" if report.passed else "FAILED"
+            st.markdown(f"### Overall Score: :{dq_colour}[**{report.overall_score:.1f} / 100 — {dq_status}**]")
+            st.progress(min(100, int(report.overall_score)))
+
+            st.markdown("#### DAMA-DMBOK Dimensions")
+            for dim_name, dim in report.dimensions.items():
+                dcol_label, dcol_bar, dcol_score = st.columns([2, 4, 1])
+                dcol_label.markdown(f"**{dim_name.title()}**")
+                dcol_bar.progress(min(100, int(dim.score)))
+                dcol_score.markdown(f"**{dim.score:.0f}**")
+                for issue in dim.issues:
+                    st.markdown(f"&nbsp;&nbsp;&nbsp;🔴 {issue}")
+                if dim.notes:
+                    st.caption(dim.notes)
+
+            if report.critical_issues:
+                st.divider()
+                st.markdown("#### Critical Issues")
+                for issue in report.critical_issues:
+                    st.error(issue)
+
+            if report.recommendations:
+                st.markdown("#### Recommendations")
+                for rec in report.recommendations:
+                    st.markdown(f"- {rec}")
+
+            total_expectations = sum(len(fq.expectations) for fq in report.field_quality)
+            st.divider()
+            st.markdown(
+                f"**{total_expectations}** Great Expectations rules generated "
+                f"across **{len(report.field_quality)}** fields"
+            )
+            with st.expander("Field-level detail"):
+                dq_rows = [
+                    {
+                        "Field": fq.field_name,
+                        "Completeness": f"{fq.completeness_score:.0f}",
+                        "Issues": "; ".join(fq.issues) or "—",
+                        "GE Rules": len(fq.expectations),
+                    }
+                    for fq in report.field_quality
+                ]
+                st.dataframe(pd.DataFrame(dq_rows), hide_index=True, use_container_width=True)
+
+            dq_base_name = report.dataset_name.lower().replace(" ", "_")
+            st.download_button(
+                "⬇ Download Quality Report (JSON)",
+                data=json.dumps(json.loads(report.model_dump_json()), indent=2, default=str).encode("utf-8"),
+                file_name=f"{dq_base_name}_quality_report.json",
+                mime="application/json",
+            )
+
+            if st.button("Re-run", key="btn_rerun_dq"):
+                st.session_state["quality_report"] = None
+                st.rerun()
 
     # ──────────────────── RAW YAML tab ────────────────────────────────────
     with tab_raw:
