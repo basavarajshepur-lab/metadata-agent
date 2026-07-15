@@ -46,6 +46,8 @@ When generating metadata you MUST:
 
 7. Be precise about regulatory frameworks. Don't mark BCBS_239 unless the dataset is genuinely risk/market/regulatory data.
 
+8. Token budget discipline. The final `generate_dataset_metadata` call has a limited output budget and must cover EVERY field in the dataset profile — that `fields` array is the most important part of the output and the whole point of the tool. Keep the dataset-level `description`, `business_context`, `usage_guidance`, and `known_limitations` to 2-4 sentences each, not multi-paragraph essays. Keep each field's `description`, `business_context`, and `usage_guidance` to one or two sentences, and only fill `example_usage` / `business_rules` / `quality_notes` when there's something genuinely field-specific to say — leave them out otherwise. Never sacrifice coverage of the full field list for extra prose on any single section.
+
 ## Agentic Tool Workflow
 
 Use tools in this order on every run:

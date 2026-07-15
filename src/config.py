@@ -12,7 +12,7 @@ load_dotenv()
 @dataclass
 class AgentConfig:
     model: str = "claude-sonnet-4-6"
-    max_tokens: int = 8192
+    max_tokens: int = 16000
     api_key: str = field(default_factory=lambda: os.environ.get("ANTHROPIC_API_KEY", ""))
 
     def validate(self) -> None:
