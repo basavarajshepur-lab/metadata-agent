@@ -154,10 +154,10 @@ _METADATA_TOOL: dict[str, Any] = {
                         "business_context": {"type": "string"},
                         "data_type": {"type": "string", "enum": [d.value for d in DataType]},
                         "format": {"type": "string"},
-                        "is_pii": {"type": "boolean"},
+                        "is_pii": {"type": "boolean", "description": "true or false only."},
                         "pii_type": {"type": "string", "enum": [p.value for p in PIIType]},
                         "sensitivity_level": {"type": "string", "enum": [s.value for s in SensitivityLevel]},
-                        "is_key_field": {"type": "boolean"},
+                        "is_key_field": {"type": "boolean", "description": "true or false only."},
                         "usage_guidance": {"type": "string"},
                         "example_usage": {"type": "string"},
                         "business_rules": {"type": "string"},
@@ -187,17 +187,17 @@ _METADATA_TOOL: dict[str, Any] = {
                 "type": "object",
                 "required": ["gdpr_applicable", "uk_gdpr_applicable"],
                 "properties": {
-                    "gdpr_applicable": {"type": "boolean"},
-                    "uk_gdpr_applicable": {"type": "boolean"},
+                    "gdpr_applicable": {"type": "boolean", "description": "true or false only — reasoning goes in lawful_basis or a field's usage_guidance, not here."},
+                    "uk_gdpr_applicable": {"type": "boolean", "description": "true or false only."},
                     "regulatory_frameworks": {
                         "type": "array",
                         "items": {"type": "string", "enum": [r.value for r in RegulatoryFramework]},
                     },
                     "data_residency_requirements": {"type": "string"},
                     "retention_period": {"type": "string"},
-                    "cross_border_transfer_restrictions": {"type": "boolean"},
-                    "consent_required": {"type": "boolean"},
-                    "right_to_erasure_applicable": {"type": "boolean"},
+                    "cross_border_transfer_restrictions": {"type": "boolean", "description": "true or false only — explain which rails/corridors trigger this in data_residency_requirements or retention_period, not here."},
+                    "consent_required": {"type": "boolean", "description": "true or false only."},
+                    "right_to_erasure_applicable": {"type": "boolean", "description": "true or false only."},
                     "lawful_basis": {"type": "string"},
                 },
             },
@@ -228,10 +228,33 @@ For every field, write descriptions and business context that a data analyst can
 Apply BCBS 239 lineage and quality principles where appropriate."""
 
 
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    """Tool schemas declare these as booleans, but the model isn't always compliant —
+    it occasionally writes an explanatory sentence instead of true/false. Treat any
+    non-empty freeform text as an affirmative explanation rather than crash the run."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("true", "yes", "1"):
+            return True
+        if v in ("false", "no", "0", ""):
+            return False
+        return True  # non-empty explanatory text — the model was justifying a "yes"
+    return default
+
+
 def _parse_tool_result(raw: dict[str, Any], dataset_name: str) -> DatasetMetadata:
     fields = []
     for f in raw.get("fields", []):
         constraints_raw = f.get("constraints") or {}
+        constraints_raw = dict(constraints_raw)
+        if "nullable" in constraints_raw:
+            constraints_raw["nullable"] = _coerce_bool(constraints_raw["nullable"], True)
+        if "unique" in constraints_raw:
+            constraints_raw["unique"] = _coerce_bool(constraints_raw["unique"], False)
         constraints = FieldConstraints(**{k: v for k, v in constraints_raw.items() if v is not None})
         pii_type_raw = f.get("pii_type")
         pii_type = PIIType(pii_type_raw) if pii_type_raw else None
@@ -244,10 +267,10 @@ def _parse_tool_result(raw: dict[str, Any], dataset_name: str) -> DatasetMetadat
                 data_type=DataType(f.get("data_type", "string")),
                 format=f.get("format"),
                 constraints=constraints,
-                is_pii=f.get("is_pii", False),
+                is_pii=_coerce_bool(f.get("is_pii", False)),
                 pii_type=pii_type,
                 sensitivity_level=SensitivityLevel(f.get("sensitivity_level", "internal")),
-                is_key_field=f.get("is_key_field", False),
+                is_key_field=_coerce_bool(f.get("is_key_field", False)),
                 usage_guidance=f.get("usage_guidance", ""),
                 example_usage=f.get("example_usage"),
                 business_rules=f.get("business_rules"),
@@ -266,14 +289,14 @@ def _parse_tool_result(raw: dict[str, Any], dataset_name: str) -> DatasetMetadat
             pass
 
     compliance = ComplianceInfo(
-        gdpr_applicable=compliance_raw.get("gdpr_applicable", False),
-        uk_gdpr_applicable=compliance_raw.get("uk_gdpr_applicable", False),
+        gdpr_applicable=_coerce_bool(compliance_raw.get("gdpr_applicable", False)),
+        uk_gdpr_applicable=_coerce_bool(compliance_raw.get("uk_gdpr_applicable", False)),
         regulatory_frameworks=reg_frameworks,
         data_residency_requirements=compliance_raw.get("data_residency_requirements"),
         retention_period=compliance_raw.get("retention_period"),
-        cross_border_transfer_restrictions=compliance_raw.get("cross_border_transfer_restrictions", False),
-        consent_required=compliance_raw.get("consent_required", False),
-        right_to_erasure_applicable=compliance_raw.get("right_to_erasure_applicable", False),
+        cross_border_transfer_restrictions=_coerce_bool(compliance_raw.get("cross_border_transfer_restrictions", False)),
+        consent_required=_coerce_bool(compliance_raw.get("consent_required", False)),
+        right_to_erasure_applicable=_coerce_bool(compliance_raw.get("right_to_erasure_applicable", False)),
         lawful_basis=compliance_raw.get("lawful_basis"),
     )
 
