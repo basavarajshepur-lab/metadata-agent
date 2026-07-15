@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Tuple
 
 from fpdf import FPDF
+from fpdf.enums import WrapMode, XPos, YPos
 
 from ..schema import DatasetMetadata, SensitivityLevel
 
@@ -30,6 +31,29 @@ def _trunc(text: str, n: int) -> str:
     return text[:n] + "..." if len(text) > n else text
 
 
+# fpdf2's core Helvetica font only supports latin-1. Claude's prose routinely uses
+# em/en dashes, curly quotes, and ellipses that fall outside that range and would
+# otherwise raise FPDFUnicodeEncodingException / "not enough horizontal space".
+_PDF_CHAR_MAP = {
+    "–": "-", "—": "-",       # en dash, em dash
+    "‘": "'", "’": "'",       # curly single quotes
+    "“": '"', "”": '"',       # curly double quotes
+    "…": "...",                     # ellipsis
+    " ": " ",                       # non-breaking space
+    "•": "-",                       # bullet
+    "−": "-",                       # minus sign
+}
+
+
+def _sanitize_pdf_text(text):
+    if not isinstance(text, str):
+        return text
+    for uni, ascii_ in _PDF_CHAR_MAP.items():
+        text = text.replace(uni, ascii_)
+    # Safety net for anything else outside latin-1 (accented chars beyond cp1252, etc.)
+    return text.encode("latin-1", errors="replace").decode("latin-1")
+
+
 class MetadataPDF(FPDF):
     def __init__(self, dataset_name: str, classification: str):
         super().__init__(orientation="P", format="A4")
@@ -37,6 +61,17 @@ class MetadataPDF(FPDF):
         self._classification = classification.upper()
         self.set_margins(15, 28, 15)
         self.set_auto_page_break(True, margin=20)
+
+    def cell(self, w=None, h=None, text="", *args, **kwargs):
+        return super().cell(w, h, _sanitize_pdf_text(text), *args, **kwargs)
+
+    def multi_cell(self, w, h=None, text="", *args, **kwargs):
+        # Model-generated text can contain unbroken long tokens (URLs, table.column
+        # refs) that WORD wrap mode can't break, raising "not enough horizontal
+        # space to render a single character". CHAR mode always finds somewhere to
+        # break instead of raising.
+        kwargs.setdefault("wrapmode", WrapMode.CHAR)
+        return super().multi_cell(w, h, _sanitize_pdf_text(text), *args, **kwargs)
 
     def header(self):
         self.set_fill_color(*NAVY)
@@ -68,9 +103,15 @@ class MetadataPDF(FPDF):
         self.set_fill_color(*(LIGHT_GRAY if shade else WHITE))
         self.set_text_color(*BLACK)
         self.set_font("Helvetica", "B", 8)
-        self.cell(45, 6, key, fill=True, border="B")
+        self.cell(45, 6, key, fill=True, border="B", new_x=XPos.RIGHT, new_y=YPos.TOP)
         self.set_font("Helvetica", "", 8)
-        self.multi_cell(0, 6, value or "—", fill=True, border="B")
+        # multi_cell's default new_x=RIGHT leaves the cursor at the end of the
+        # wrapped text rather than back at the left margin. Left unfixed, that
+        # drift compounds across successive kv_row calls until the "remaining
+        # width" for some later row's value hits zero or goes negative — fpdf2
+        # then either raises "not enough horizontal space" (WORD wrap) or hangs
+        # forever (CHAR wrap). Always start the next row at the left margin.
+        self.multi_cell(0, 6, value or "—", fill=True, border="B", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
     def _sensitivity_badge(self, level: str):
         rgb = SENSITIVITY_RGB.get(level.lower(), MID_GRAY if isinstance(MID_GRAY, tuple) else (100, 116, 139))

@@ -48,6 +48,18 @@ def _set_cell_bg(cell, hex_color: str):
     tcPr.append(shd)
 
 
+def _set_paragraph_bg(paragraph, hex_color: str):
+    """Shade a Paragraph's background. Paragraphs use pPr (not tcPr like table
+    cells) — passing paragraph._p into _set_cell_bg raises AttributeError since
+    CT_P has no _tc."""
+    pPr = paragraph._p.get_or_add_pPr()
+    shd = OxmlElement("w:shd")
+    shd.set(qn("w:val"), "clear")
+    shd.set(qn("w:color"), "auto")
+    shd.set(qn("w:fill"), hex_color)
+    pPr.append(shd)
+
+
 def _set_cell_text(cell, text: str, bold: bool = False, size: int = 8,
                    color: RGBColor = BLACK, align: str = "left"):
     para = cell.paragraphs[0]
@@ -129,7 +141,7 @@ def export(metadata: DatasetMetadata) -> bytes:
     cls_run.font.size = Pt(9)
     cls_run.font.color.rgb = WHITE
     shade_hex = SENSITIVITY_HEX.get(metadata.classification.value, "2E86AB")
-    _set_cell_bg(cls_para._p, shade_hex)  # Can't shade para directly, use table below instead
+    _set_paragraph_bg(cls_para, shade_hex)
 
     doc.add_paragraph()
 
