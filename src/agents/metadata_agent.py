@@ -174,7 +174,11 @@ _METADATA_TOOL: dict[str, Any] = {
                                 "min_length": {"type": "integer"},
                                 "max_length": {"type": "integer"},
                                 "pattern": {"type": "string"},
-                                "allowed_values": {"type": "array", "items": {"type": "string"}},
+                                "allowed_values": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Strings only, even for boolean/numeric domains — use [\"true\", \"false\"] not [true, false].",
+                                },
                                 "foreign_key_ref": {"type": "string"},
                                 "precision": {"type": "integer"},
                                 "scale": {"type": "integer"},
@@ -246,6 +250,24 @@ def _coerce_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
+def _coerce_str_list(values: Any) -> list[str]:
+    """Tool schemas declare these as arrays of strings, but the model sometimes
+    writes native JSON booleans/numbers instead (e.g. allowed_values: [true, false]
+    for a boolean-typed column instead of ["true", "false"]). Stringify rather
+    than let Pydantic's strict str validation crash the whole run."""
+    if not values:
+        return []
+    out = []
+    for v in values:
+        if isinstance(v, bool):
+            out.append("true" if v else "false")
+        elif isinstance(v, str):
+            out.append(v)
+        else:
+            out.append(str(v))
+    return out
+
+
 def _parse_tool_result(raw: dict[str, Any], dataset_name: str) -> DatasetMetadata:
     fields = []
     for f in raw.get("fields", []):
@@ -255,6 +277,8 @@ def _parse_tool_result(raw: dict[str, Any], dataset_name: str) -> DatasetMetadat
             constraints_raw["nullable"] = _coerce_bool(constraints_raw["nullable"], True)
         if "unique" in constraints_raw:
             constraints_raw["unique"] = _coerce_bool(constraints_raw["unique"], False)
+        if constraints_raw.get("allowed_values") is not None:
+            constraints_raw["allowed_values"] = _coerce_str_list(constraints_raw["allowed_values"])
         constraints = FieldConstraints(**{k: v for k, v in constraints_raw.items() if v is not None})
         pii_type_raw = f.get("pii_type")
         pii_type = PIIType(pii_type_raw) if pii_type_raw else None
@@ -276,7 +300,7 @@ def _parse_tool_result(raw: dict[str, Any], dataset_name: str) -> DatasetMetadat
                 business_rules=f.get("business_rules"),
                 data_lineage=f.get("data_lineage"),
                 quality_notes=f.get("quality_notes"),
-                tags=f.get("tags", []),
+                tags=_coerce_str_list(f.get("tags")),
             )
         )
 
@@ -313,7 +337,7 @@ def _parse_tool_result(raw: dict[str, Any], dataset_name: str) -> DatasetMetadat
         compliance=compliance,
         usage_guidance=raw.get("usage_guidance", ""),
         known_limitations=raw.get("known_limitations"),
-        related_datasets=raw.get("related_datasets", []),
+        related_datasets=_coerce_str_list(raw.get("related_datasets")),
     )
 
 

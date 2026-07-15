@@ -5,7 +5,7 @@ being caught locally, because nothing exercised `_parse_tool_result` against
 anything other than a clean, complete tool call.
 """
 
-from src.agents.metadata_agent import _coerce_bool, _parse_tool_result
+from src.agents.metadata_agent import _coerce_bool, _coerce_str_list, _parse_tool_result
 
 
 def test_coerce_bool_passes_through_real_booleans():
@@ -32,6 +32,16 @@ def test_coerce_bool_freeform_explanation_does_not_crash():
 def test_coerce_bool_missing_value_uses_default():
     assert _coerce_bool(None, default=True) is True
     assert _coerce_bool(None, default=False) is False
+
+
+def test_coerce_str_list_stringifies_non_string_items():
+    """Regression: model wrote allowed_values: [true, false] for a boolean-typed
+    column instead of ["true", "false"], crashing FieldConstraints validation."""
+    assert _coerce_str_list([True, False]) == ["true", "false"]
+    assert _coerce_str_list(["already", "strings"]) == ["already", "strings"]
+    assert _coerce_str_list([1, 2.5, "x"]) == ["1", "2.5", "x"]
+    assert _coerce_str_list(None) == []
+    assert _coerce_str_list([]) == []
 
 
 def _minimal_raw_tool_call(**overrides) -> dict:
@@ -103,6 +113,30 @@ def test_parse_tool_result_coerces_boolean_fields_in_field_entries():
     assert f.is_key_field is False
     assert f.constraints.nullable is False
     assert f.constraints.unique is True
+
+
+def test_parse_tool_result_coerces_allowed_values_and_tags():
+    raw = _minimal_raw_tool_call(
+        fields=[
+            {
+                "name": "is_active",
+                "display_name": "Is Active",
+                "description": "d",
+                "business_context": "b",
+                "data_type": "boolean",
+                "is_pii": False,
+                "sensitivity_level": "internal",
+                "usage_guidance": "u",
+                "tags": ["flag", True],
+                "constraints": {"allowed_values": [True, False]},
+            }
+        ],
+        related_datasets=["Account Master", 42],
+    )
+    md = _parse_tool_result(raw, "Test Dataset")
+    assert md.fields[0].constraints.allowed_values == ["true", "false"]
+    assert md.fields[0].tags == ["flag", "true"]
+    assert md.related_datasets == ["Account Master", "42"]
 
 
 def test_parse_tool_result_full_realistic_payload():
